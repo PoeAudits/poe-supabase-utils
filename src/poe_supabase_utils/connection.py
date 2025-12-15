@@ -1,193 +1,228 @@
 from __future__ import annotations
 
-# import os
+import logging
 import time
-from datetime import datetime, timedelta
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from functools import partial
-from typing import Optional, Iterator
+from typing import Iterator, Optional
+
 from supabase import Client, create_client
-from poe_supabase_utils.config import SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+
+from poe_supabase_utils.config import get_config
+
+logger = logging.getLogger(__name__)
+
+ITERATIONS_MAX = 1000
+
+
+def _validate_table_name(table_name: str) -> None:
+    if not isinstance(table_name, str):
+        raise TypeError(f"table_name must be str, got {type(table_name).__name__}")
+    if not table_name.strip():
+        raise ValueError("table_name cannot be empty")
+
+
+def _validate_positive_int(value: int, name: str) -> None:
+    if not isinstance(value, int):
+        raise TypeError(f"{name} must be int, got {type(value).__name__}")
+    if value <= 0:
+        raise ValueError(f"{name} must be positive, got {value}")
+
+
+def _validate_non_negative_float(value: float, name: str) -> None:
+    if not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be numeric, got {type(value).__name__}")
+    if value < 0:
+        raise ValueError(f"{name} must be non-negative, got {value}")
 
 
 @dataclass(frozen=True)
 class DatabaseClient:
+    """Wrapper around Supabase client with validation."""
+
     client: Client
 
-    def __init__(self) -> None:
-        url: Optional[str] = SUPABASE_URL
-        service_key: Optional[str] = SUPABASE_SERVICE_ROLE_KEY
-        assert url is not None, "SUPABASE_URL environment variable must be set"
-        assert service_key is not None, (
-            "SUPABASE_SERVICE_ROLE_KEY environment variable must be set"
-        )
-        assert len(url.strip()) > 0, "SUPABASE_URL cannot be empty string"
-        assert len(service_key.strip()) > 0, (
-            "SUPABASE_SERVICE_ROLE_KEY cannot be empty string"
-        )
-        if not url or not service_key:
-            raise ValueError(
-                "Supabase URL and Key must be set as environment variables."
-            )
-        supa_client: Client = create_client(url, service_key)
-        assert supa_client is not None, "Failed to create Supabase client"
+    def __init__(self, config: Optional[object] = None) -> None:
+        """Initialize DatabaseClient.
+
+        Args:
+            config: Optional SupabaseConfig. If None, loads from environment.
+
+        Raises:
+            ValueError: If configuration is invalid.
+        """
+        if config is None:
+            config = get_config()
+
+        supa_client: Client = create_client(config.url, config.service_role_key)
         object.__setattr__(self, "client", supa_client)
 
+    def __enter__(self) -> DatabaseClient:
+        return self
 
-# Single shared DatabaseClient instance for partials
-db = DatabaseClient()
+    def __exit__(
+        self,
+        exc_type: Optional[type],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[object],
+    ) -> None:
+        pass
 
 
-# ---------- Prefixed functions that accept DatabaseClient ----------
+_db: Optional[DatabaseClient] = None
+
+
+def get_db() -> DatabaseClient:
+    """Get or create the shared DatabaseClient instance."""
+    global _db
+    if _db is None:
+        _db = DatabaseClient()
+    return _db
 
 
 def supabase_get_all_messages(
     table_name: str,
     *,
     client: DatabaseClient,
-    sleep_time: float = 0.5,
+    sleep_time_s: float = 0.5,
     limit_per_request: int = 1000,
 ) -> list[dict]:
-    assert isinstance(table_name, str), (
-        f"table_name must be string, got {type(table_name)}"
-    )
-    assert len(table_name.strip()) > 0, "table_name cannot be empty"
-    assert isinstance(client, DatabaseClient), (
-        f"client must be DatabaseClient, got {type(client)}"
-    )
-    assert isinstance(sleep_time, (int, float)), (
-        f"sleep_time must be numeric, got {type(sleep_time)}"
-    )
-    assert sleep_time >= 0, f"sleep_time must be non-negative, got {sleep_time}"
-    assert isinstance(limit_per_request, int), (
-        f"limit_per_request must be int, got {type(limit_per_request)}"
-    )
-    assert limit_per_request > 0, (
-        f"limit_per_request must be positive, got {limit_per_request}"
-    )
+    """Retrieve all messages from a table with pagination.
 
-    try:
-        all_records: list[dict] = []
-        offset = 0
+    Args:
+        table_name: Name of the table to query.
+        client: DatabaseClient instance.
+        sleep_time_s: Sleep duration between requests in seconds.
+        limit_per_request: Maximum rows per request.
 
-        while True:
-            response = (
-                client.client.table(table_name)
-                .select("*")
-                .range(offset, offset + limit_per_request - 1)
-                .execute()
-            )
-            assert response is not None, "Database response cannot be None"
+    Returns:
+        List of all records from the table.
 
-            if response.data:
-                assert isinstance(response.data, list), (
-                    f"response.data must be list, got {type(response.data)}"
-                )
-                all_records.extend(response.data)
-                if len(response.data) < limit_per_request:
-                    break
-                offset += limit_per_request
-                time.sleep(sleep_time)
-            else:
-                print("Error retrieving data or no more records.")
-                break
+    Raises:
+        TypeError: If arguments have wrong types.
+        ValueError: If arguments have invalid values.
+        RuntimeError: If iteration limit exceeded.
+    """
+    _validate_table_name(table_name)
+    _validate_non_negative_float(sleep_time_s, "sleep_time_s")
+    _validate_positive_int(limit_per_request, "limit_per_request")
 
-        assert isinstance(all_records, list), (
-            f"all_records must be list, got {type(all_records)}"
-        )
-        assert all(isinstance(record, dict) for record in all_records), (
-            "All records must be dictionaries"
-        )
-        return all_records
-
-    except Exception as e:
-        raise e
-
-
-def supabase_stream_all_messages(
-    table_name: str,
-    *,
-    client: DatabaseClient,
-    sleep_time: float = 0.5,
-    limit_per_request: int = 1000,
-) -> Iterator[dict]:
-    assert isinstance(table_name, str), (
-        f"table_name must be string, got {type(table_name)}"
-    )
-    assert len(table_name.strip()) > 0, "table_name cannot be empty"
-    assert isinstance(client, DatabaseClient), (
-        f"client must be DatabaseClient, got {type(client)}"
-    )
-    assert isinstance(sleep_time, (int, float)), (
-        f"sleep_time must be numeric, got {type(sleep_time)}"
-    )
-    assert sleep_time >= 0, f"sleep_time must be non-negative, got {sleep_time}"
-    assert isinstance(limit_per_request, int), (
-        f"limit_per_request must be int, got {type(limit_per_request)}"
-    )
-    assert limit_per_request > 0, (
-        f"limit_per_request must be positive, got {limit_per_request}"
-    )
-
+    all_records: list[dict] = []
     offset = 0
-    while True:
+
+    for _ in range(ITERATIONS_MAX):
         response = (
             client.client.table(table_name)
             .select("*")
             .range(offset, offset + limit_per_request - 1)
             .execute()
         )
-        assert response is not None, "Database response cannot be None"
 
-        rows = response.data or []
-        assert isinstance(rows, list), f"rows must be list, got {type(rows)}"
-        if not rows:
+        if not response.data:
+            logger.debug("No more records found")
             break
 
-        for row in rows:
-            assert isinstance(row, dict), f"Each row must be dict, got {type(row)}"
-            yield row
-
-        if len(rows) < limit_per_request:
+        all_records.extend(response.data)
+        if len(response.data) < limit_per_request:
             break
 
         offset += limit_per_request
-        time.sleep(sleep_time)
+        time.sleep(sleep_time_s)
+    else:
+        raise RuntimeError(
+            f"Exceeded {ITERATIONS_MAX} iterations fetching from {table_name}"
+        )
+
+    return all_records
+
+
+def supabase_stream_all_messages(
+    table_name: str,
+    *,
+    client: DatabaseClient,
+    sleep_time_s: float = 0.5,
+    limit_per_request: int = 1000,
+) -> Iterator[dict]:
+    """Stream all messages from a table with pagination.
+
+    Args:
+        table_name: Name of the table to query.
+        client: DatabaseClient instance.
+        sleep_time_s: Sleep duration between requests in seconds.
+        limit_per_request: Maximum rows per request.
+
+    Yields:
+        Individual records from the table.
+
+    Raises:
+        TypeError: If arguments have wrong types.
+        ValueError: If arguments have invalid values.
+        RuntimeError: If iteration limit exceeded.
+    """
+    _validate_table_name(table_name)
+    _validate_non_negative_float(sleep_time_s, "sleep_time_s")
+    _validate_positive_int(limit_per_request, "limit_per_request")
+
+    offset = 0
+
+    for _ in range(ITERATIONS_MAX):
+        response = (
+            client.client.table(table_name)
+            .select("*")
+            .range(offset, offset + limit_per_request - 1)
+            .execute()
+        )
+
+        rows = response.data or []
+        if not rows:
+            return
+
+        for row in rows:
+            yield row
+
+        if len(rows) < limit_per_request:
+            return
+
+        offset += limit_per_request
+        time.sleep(sleep_time_s)
+
+    raise RuntimeError(
+        f"Exceeded {ITERATIONS_MAX} iterations streaming from {table_name}"
+    )
 
 
 def supabase_stream_recent_messages(
     table_name: str,
-    number_of_messages: int,
+    messages_count: int,
     *,
     client: DatabaseClient,
     batch_size: int = 1000,
 ) -> Iterator[dict]:
-    assert isinstance(table_name, str), (
-        f"table_name must be string, got {type(table_name)}"
-    )
-    assert len(table_name.strip()) > 0, "table_name cannot be empty"
-    assert isinstance(number_of_messages, int), (
-        f"number_of_messages must be int, got {type(number_of_messages)}"
-    )
-    assert number_of_messages > 0, (
-        f"number_of_messages must be positive, got {number_of_messages}"
-    )
-    assert isinstance(client, DatabaseClient), (
-        f"client must be DatabaseClient, got {type(client)}"
-    )
-    assert isinstance(batch_size, int), (
-        f"batch_size must be int, got {type(batch_size)}"
-    )
-    assert batch_size > 0, f"batch_size must be positive, got {batch_size}"
+    """Stream the most recent messages from a table.
+
+    Args:
+        table_name: Name of the table to query.
+        messages_count: Number of messages to retrieve.
+        client: DatabaseClient instance.
+        batch_size: Maximum rows per request.
+
+    Yields:
+        Individual records, most recent first.
+
+    Raises:
+        TypeError: If arguments have wrong types.
+        ValueError: If arguments have invalid values.
+    """
+    _validate_table_name(table_name)
+    _validate_positive_int(messages_count, "messages_count")
+    _validate_positive_int(batch_size, "batch_size")
 
     emitted = 0
     offset = 0
 
-    while emitted < number_of_messages:
-        current_batch_size = min(batch_size, number_of_messages - emitted)
-        assert current_batch_size > 0, (
-            f"current_batch_size must be positive, got {current_batch_size}"
-        )
+    while emitted < messages_count:
+        current_batch_size = min(batch_size, messages_count - emitted)
 
         response = (
             client.client.table(table_name)
@@ -196,95 +231,75 @@ def supabase_stream_recent_messages(
             .range(offset, offset + current_batch_size - 1)
             .execute()
         )
-        assert response is not None, "Database response cannot be None"
 
         rows = response.data or []
-        assert isinstance(rows, list), f"rows must be list, got {type(rows)}"
         if not rows:
-            break
+            return
 
         for row in rows:
-            assert isinstance(row, dict), f"Each row must be dict, got {type(row)}"
             yield row
             emitted += 1
-            if emitted >= number_of_messages:
+            if emitted >= messages_count:
                 return
 
         if len(rows) < current_batch_size:
-            break
+            return
 
         offset += current_batch_size
 
 
 def supabase_get_recent_messages(
     table_name: str,
-    number_of_messages: int,
+    messages_count: int,
     *,
     client: DatabaseClient,
     batch_size: int = 1000,
 ) -> list[dict]:
-    assert isinstance(table_name, str), (
-        f"table_name must be string, got {type(table_name)}"
-    )
-    assert len(table_name.strip()) > 0, "table_name cannot be empty"
-    assert isinstance(number_of_messages, int), (
-        f"number_of_messages must be int, got {type(number_of_messages)}"
-    )
-    assert number_of_messages > 0, (
-        f"number_of_messages must be positive, got {number_of_messages}"
-    )
-    assert isinstance(client, DatabaseClient), (
-        f"client must be DatabaseClient, got {type(client)}"
-    )
-    assert isinstance(batch_size, int), (
-        f"batch_size must be int, got {type(batch_size)}"
-    )
-    assert batch_size > 0, f"batch_size must be positive, got {batch_size}"
+    """Retrieve the most recent messages from a table.
 
-    try:
-        all_records: list[dict] = []
-        offset = 0
+    Args:
+        table_name: Name of the table to query.
+        messages_count: Number of messages to retrieve.
+        client: DatabaseClient instance.
+        batch_size: Maximum rows per request.
 
-        while len(all_records) < number_of_messages:
-            remaining_messages = number_of_messages - len(all_records)
-            current_batch_size = min(batch_size, remaining_messages)
-            assert current_batch_size > 0, (
-                f"current_batch_size must be positive, got {current_batch_size}"
-            )
+    Returns:
+        List of records, most recent first.
 
-            response = (
-                client.client.table(table_name)
-                .select("*")
-                .order("timestamp", desc=True)
-                .range(offset, offset + current_batch_size - 1)
-                .execute()
-            )
-            assert response is not None, "Database response cannot be None"
+    Raises:
+        TypeError: If arguments have wrong types.
+        ValueError: If arguments have invalid values.
+    """
+    _validate_table_name(table_name)
+    _validate_positive_int(messages_count, "messages_count")
+    _validate_positive_int(batch_size, "batch_size")
 
-            if response.data:
-                assert isinstance(response.data, list), (
-                    f"response.data must be list, got {type(response.data)}"
-                )
-                all_records.extend(response.data)
-                offset += current_batch_size
-                if len(response.data) < current_batch_size:
-                    break
-            else:
-                print("Error retrieving data or no more records.")
-                break
+    all_records: list[dict] = []
+    offset = 0
 
-        result = all_records[:number_of_messages]
-        assert isinstance(result, list), f"result must be list, got {type(result)}"
-        assert all(isinstance(record, dict) for record in result), (
-            "All records must be dictionaries"
+    while len(all_records) < messages_count:
+        remaining = messages_count - len(all_records)
+        current_batch_size = min(batch_size, remaining)
+
+        response = (
+            client.client.table(table_name)
+            .select("*")
+            .order("timestamp", desc=True)
+            .range(offset, offset + current_batch_size - 1)
+            .execute()
         )
-        assert len(result) <= number_of_messages, (
-            f"Result length {len(result)} exceeds requested {number_of_messages}"
-        )
-        return result
 
-    except Exception as e:
-        raise e
+        if not response.data:
+            logger.debug("No more records found")
+            break
+
+        all_records.extend(response.data)
+        if len(response.data) < current_batch_size:
+            break
+
+        offset += current_batch_size
+
+    return all_records[:messages_count]
 
 
 def supabase_stream_messages_by_timedelta(
@@ -293,41 +308,41 @@ def supabase_stream_messages_by_timedelta(
     *,
     client: DatabaseClient,
     limit_per_request: int = 1000,
-    sleep_time: float = 0.1,
+    sleep_time_s: float = 0.1,
 ) -> Iterator[dict]:
-    assert isinstance(table_name, str), (
-        f"table_name must be string, got {type(table_name)}"
-    )
-    assert len(table_name.strip()) > 0, "table_name cannot be empty"
-    assert isinstance(time_delta, timedelta), (
-        f"time_delta must be timedelta, got {type(time_delta)}"
-    )
-    assert time_delta.total_seconds() > 0, (
-        f"time_delta must be positive, got {time_delta}"
-    )
-    assert isinstance(client, DatabaseClient), (
-        f"client must be DatabaseClient, got {type(client)}"
-    )
-    assert isinstance(limit_per_request, int), (
-        f"limit_per_request must be int, got {type(limit_per_request)}"
-    )
-    assert limit_per_request > 0, (
-        f"limit_per_request must be positive, got {limit_per_request}"
-    )
-    assert isinstance(sleep_time, (int, float)), (
-        f"sleep_time must be numeric, got {type(sleep_time)}"
-    )
-    assert sleep_time >= 0, f"sleep_time must be non-negative, got {sleep_time}"
+    """Stream messages within a time window.
+
+    Args:
+        table_name: Name of the table to query.
+        time_delta: Time window from now to look back.
+        client: DatabaseClient instance.
+        limit_per_request: Maximum rows per request.
+        sleep_time_s: Sleep duration between requests in seconds.
+
+    Yields:
+        Individual records within the time window.
+
+    Raises:
+        TypeError: If arguments have wrong types.
+        ValueError: If arguments have invalid values.
+        RuntimeError: If iteration limit exceeded.
+    """
+    _validate_table_name(table_name)
+    if not isinstance(time_delta, timedelta):
+        raise TypeError(
+            f"time_delta must be timedelta, got {type(time_delta).__name__}"
+        )
+    if time_delta.total_seconds() <= 0:
+        raise ValueError(f"time_delta must be positive, got {time_delta}")
+    _validate_positive_int(limit_per_request, "limit_per_request")
+    _validate_non_negative_float(sleep_time_s, "sleep_time_s")
 
     time_cutoff = datetime.now() - time_delta
     timestamp_filter = time_cutoff.isoformat()
-    assert isinstance(timestamp_filter, str), (
-        f"timestamp_filter must be string, got {type(timestamp_filter)}"
-    )
-    assert len(timestamp_filter) > 0, "timestamp_filter cannot be empty"
 
     offset = 0
-    while True:
+
+    for _ in range(ITERATIONS_MAX):
         response = (
             client.client.table(table_name)
             .select("*")
@@ -336,22 +351,23 @@ def supabase_stream_messages_by_timedelta(
             .range(offset, offset + limit_per_request - 1)
             .execute()
         )
-        assert response is not None, "Database response cannot be None"
 
         rows = response.data or []
-        assert isinstance(rows, list), f"rows must be list, got {type(rows)}"
         if not rows:
-            break
+            return
 
         for row in rows:
-            assert isinstance(row, dict), f"Each row must be dict, got {type(row)}"
             yield row
 
         if len(rows) < limit_per_request:
-            break
+            return
 
         offset += limit_per_request
-        time.sleep(sleep_time)
+        time.sleep(sleep_time_s)
+
+    raise RuntimeError(
+        f"Exceeded {ITERATIONS_MAX} iterations streaming from {table_name}"
+    )
 
 
 def supabase_get_messages_by_timedelta(
@@ -360,84 +376,72 @@ def supabase_get_messages_by_timedelta(
     *,
     client: DatabaseClient,
     limit_per_request: int = 1000,
-    sleep_time: float = 0.1,
+    sleep_time_s: float = 0.1,
 ) -> list[dict]:
+    """Retrieve all messages within a time window.
+
+    Args:
+        table_name: Name of the table to query.
+        time_delta: Time window from now to look back.
+        client: DatabaseClient instance.
+        limit_per_request: Maximum rows per request.
+        sleep_time_s: Sleep duration between requests in seconds.
+
+    Returns:
+        List of records within the time window.
+
+    Raises:
+        TypeError: If arguments have wrong types.
+        ValueError: If arguments have invalid values.
+        RuntimeError: If iteration limit exceeded.
     """
-    Retrieve all messages from the last `minutes` minutes using batching logic.
-    """
-    assert isinstance(table_name, str), (
-        f"table_name must be string, got {type(table_name)}"
-    )
-    assert len(table_name.strip()) > 0, "table_name cannot be empty"
-    assert isinstance(time_delta, timedelta), (
-        f"time_delta must be timedelta, got {type(time_delta)}"
-    )
-    assert time_delta.total_seconds() > 0, (
-        f"time_delta must be positive, got {time_delta}"
-    )
-    assert isinstance(client, DatabaseClient), (
-        f"client must be DatabaseClient, got {type(client)}"
-    )
-    assert isinstance(limit_per_request, int), (
-        f"limit_per_request must be int, got {type(limit_per_request)}"
-    )
-    assert limit_per_request > 0, (
-        f"limit_per_request must be positive, got {limit_per_request}"
-    )
-    assert isinstance(sleep_time, (int, float)), (
-        f"sleep_time must be numeric, got {type(sleep_time)}"
-    )
-    assert sleep_time >= 0, f"sleep_time must be non-negative, got {sleep_time}"
-
-    try:
-        time_cutoff = datetime.now() - time_delta
-        timestamp_filter = time_cutoff.isoformat()
-        assert isinstance(timestamp_filter, str), (
-            f"timestamp_filter must be string, got {type(timestamp_filter)}"
+    _validate_table_name(table_name)
+    if not isinstance(time_delta, timedelta):
+        raise TypeError(
+            f"time_delta must be timedelta, got {type(time_delta).__name__}"
         )
-        assert len(timestamp_filter) > 0, "timestamp_filter cannot be empty"
+    if time_delta.total_seconds() <= 0:
+        raise ValueError(f"time_delta must be positive, got {time_delta}")
+    _validate_positive_int(limit_per_request, "limit_per_request")
+    _validate_non_negative_float(sleep_time_s, "sleep_time_s")
 
-        all_records: list[dict] = []
-        offset = 0
+    time_cutoff = datetime.now() - time_delta
+    timestamp_filter = time_cutoff.isoformat()
 
-        print(f"Fetching messages since: {timestamp_filter}")
+    logger.info("Fetching messages since: %s", timestamp_filter)
 
-        while True:
-            response = (
-                client.client.table(table_name)
-                .select("*")
-                .gte("timestamp", timestamp_filter)
-                .order("timestamp", desc=True)
-                .range(offset, offset + limit_per_request - 1)
-                .execute()
-            )
-            assert response is not None, "Database response cannot be None"
+    all_records: list[dict] = []
+    offset = 0
 
-            if response.data:
-                assert isinstance(response.data, list), (
-                    f"response.data must be list, got {type(response.data)}"
-                )
-                all_records.extend(response.data)
-                print(f"Fetched {len(all_records)} messages so far...")
-                if len(response.data) < limit_per_request:
-                    break
-                offset += limit_per_request
-                time.sleep(sleep_time)
-            else:
-                print("No more records found or error occurred.")
-                break
-
-        print(f"Total messages retrieved: {len(all_records)}")
-        assert isinstance(all_records, list), (
-            f"all_records must be list, got {type(all_records)}"
+    for _ in range(ITERATIONS_MAX):
+        response = (
+            client.client.table(table_name)
+            .select("*")
+            .gte("timestamp", timestamp_filter)
+            .order("timestamp", desc=True)
+            .range(offset, offset + limit_per_request - 1)
+            .execute()
         )
-        assert all(isinstance(record, dict) for record in all_records), (
-            "All records must be dictionaries"
-        )
-        return all_records
 
-    except Exception as e:
-        raise e
+        if not response.data:
+            logger.debug("No more records found")
+            break
+
+        all_records.extend(response.data)
+        logger.debug("Fetched %d messages so far", len(all_records))
+
+        if len(response.data) < limit_per_request:
+            break
+
+        offset += limit_per_request
+        time.sleep(sleep_time_s)
+    else:
+        raise RuntimeError(
+            f"Exceeded {ITERATIONS_MAX} iterations fetching from {table_name}"
+        )
+
+    logger.info("Total messages retrieved: %d", len(all_records))
+    return all_records
 
 
 def supabase_upload_messages(
@@ -446,39 +450,38 @@ def supabase_upload_messages(
     *,
     client: DatabaseClient,
 ) -> bool:
-    assert isinstance(table_name, str), (
-        f"table_name must be string, got {type(table_name)}"
-    )
-    assert len(table_name.strip()) > 0, "table_name cannot be empty"
-    assert isinstance(messages, list), f"messages must be list, got {type(messages)}"
-    assert all(isinstance(msg, dict) for msg in messages), (
-        "All messages must be dictionaries"
-    )
-    assert isinstance(client, DatabaseClient), (
-        f"client must be DatabaseClient, got {type(client)}"
-    )
+    """Upload messages to a table.
 
-    try:
-        if not messages:
-            print("No messages to upload")
-            return True
+    Args:
+        table_name: Name of the table to insert into.
+        messages: List of message dictionaries to upload.
+        client: DatabaseClient instance.
 
-        response = client.client.table(table_name).insert(messages).execute()
-        assert response is not None, "Database response cannot be None"
+    Returns:
+        True if upload succeeded, False otherwise.
 
-        if response.data:
-            assert isinstance(response.data, list), (
-                f"response.data must be list, got {type(response.data)}"
-            )
-            print(f"Successfully uploaded {len(messages)} messages to {table_name}")
-            return True
+    Raises:
+        TypeError: If arguments have wrong types.
+        ValueError: If arguments have invalid values.
+    """
+    _validate_table_name(table_name)
+    if not isinstance(messages, list):
+        raise TypeError(f"messages must be list, got {type(messages).__name__}")
 
-        print("Error uploading messages - no data returned")
-        return False
+    if not messages:
+        logger.info("No messages to upload")
+        return True
 
-    except Exception as e:
-        print(f"Error uploading messages to {table_name}: {e}")
-        return False
+    response = client.client.table(table_name).insert(messages).execute()
+
+    if response.data:
+        logger.info(
+            "Successfully uploaded %d messages to %s", len(messages), table_name
+        )
+        return True
+
+    logger.error("Error uploading messages - no data returned")
+    return False
 
 
 def supabase_upsert_messages(
@@ -486,121 +489,111 @@ def supabase_upsert_messages(
     messages: list[dict],
     *,
     client: DatabaseClient,
-    conflict_columns: list[str] = ["text"],
+    conflict_columns: Optional[list[str]] = None,
     batch_size: int = 500,
 ) -> bool:
-    assert isinstance(table_name, str), (
-        f"table_name must be string, got {type(table_name)}"
-    )
-    assert len(table_name.strip()) > 0, "table_name cannot be empty"
-    assert isinstance(messages, list), f"messages must be list, got {type(messages)}"
-    assert all(isinstance(msg, dict) for msg in messages), (
-        "All messages must be dictionaries"
-    )
-    assert isinstance(client, DatabaseClient), (
-        f"client must be DatabaseClient, got {type(client)}"
-    )
-    assert isinstance(conflict_columns, list), (
-        f"conflict_columns must be list, got {type(conflict_columns)}"
-    )
-    assert all(isinstance(col, str) for col in conflict_columns), (
-        "All conflict_columns must be strings"
-    )
-    assert len(conflict_columns) > 0, "conflict_columns cannot be empty"
-    assert isinstance(batch_size, int), (
-        f"batch_size must be int, got {type(batch_size)}"
-    )
-    assert batch_size > 0, f"batch_size must be positive, got {batch_size}"
+    """Upsert messages to a table with deduplication.
 
-    try:
-        if not messages:
-            print("No messages to upsert")
-            return True
+    Args:
+        table_name: Name of the table to upsert into.
+        messages: List of message dictionaries to upsert.
+        client: DatabaseClient instance.
+        conflict_columns: Columns to use for conflict resolution.
+        batch_size: Maximum rows per batch.
 
-        seen_identifiers: set[tuple] = set()
-        deduplicated_messages: list[dict] = []
-        internal_duplicates = 0
+    Returns:
+        True if all batches succeeded, False otherwise.
 
-        for message in messages:
-            assert isinstance(message, dict), (
-                f"Each message must be dict, got {type(message)}"
-            )
-            identifier_tuple = tuple(message.get(col) for col in conflict_columns)
-            if identifier_tuple not in seen_identifiers:
-                seen_identifiers.add(identifier_tuple)
-                deduplicated_messages.append(message)
-            else:
-                internal_duplicates += 1
+    Raises:
+        TypeError: If arguments have wrong types.
+        ValueError: If arguments have invalid values.
+    """
+    if conflict_columns is None:
+        conflict_columns = ["text"]
 
-        if internal_duplicates > 0:
-            print(
-                f"Removed {internal_duplicates} internal duplicates from incoming batch"
-            )
-
-        total_messages = len(deduplicated_messages)
-        total_batches = (total_messages + batch_size - 1) // batch_size
-        successful_batches = 0
-        assert total_messages >= 0, (
-            f"total_messages must be non-negative, got {total_messages}"
+    _validate_table_name(table_name)
+    if not isinstance(messages, list):
+        raise TypeError(f"messages must be list, got {type(messages).__name__}")
+    if not isinstance(conflict_columns, list):
+        raise TypeError(
+            f"conflict_columns must be list, got {type(conflict_columns).__name__}"
         )
-        assert total_batches >= 0, (
-            f"total_batches must be non-negative, got {total_batches}"
-        )
+    if not conflict_columns:
+        raise ValueError("conflict_columns cannot be empty")
+    _validate_positive_int(batch_size, "batch_size")
 
-        print(
-            f"Processing {total_messages} messages in {total_batches} batches of "
-            f"{batch_size}"
-        )
-
-        on_conflict_val = ",".join(conflict_columns)
-        assert len(on_conflict_val) > 0, "on_conflict_val cannot be empty"
-
-        for i in range(0, total_messages, batch_size):
-            batch = deduplicated_messages[i : i + batch_size]
-            batch_num = (i // batch_size) + 1
-            assert isinstance(batch, list), f"batch must be list, got {type(batch)}"
-            assert len(batch) > 0, f"batch cannot be empty"
-            assert len(batch) <= batch_size, (
-                f"batch size {len(batch)} exceeds maximum {batch_size}"
-            )
-
-            try:
-                response = (
-                    client.client.table(table_name)
-                    .upsert(batch, on_conflict=on_conflict_val)
-                    .execute()
-                )
-                assert response is not None, "Database response cannot be None"
-
-                if response.data:
-                    assert isinstance(response.data, list), (
-                        f"response.data must be list, got {type(response.data)}"
-                    )
-                    successful_batches += 1
-                    print(
-                        f"Batch {batch_num}/{total_batches}: Successfully upserted "
-                        f"{len(batch)} messages"
-                    )
-                else:
-                    print(
-                        f"Batch {batch_num}/{total_batches}: Error upserting "
-                        f"{len(batch)} messages"
-                    )
-                    return False
-
-            except Exception as batch_error:
-                print(f"Batch {batch_num}/{total_batches}: Error - {batch_error}")
-                return False
-
-        assert successful_batches <= total_batches, (
-            f"successful_batches {successful_batches} cannot exceed total_batches {total_batches}"
-        )
-        print(f"Successfully completed {successful_batches}/{total_batches} batches")
+    if not messages:
+        logger.info("No messages to upsert")
         return True
 
-    except Exception as e:
-        print(f"Error in batch upsert to {table_name}: {e}")
-        return False
+    seen_identifiers: set[tuple] = set()
+    deduplicated_messages: list[dict] = []
+    duplicates_count = 0
+
+    for message in messages:
+        identifier_tuple = tuple(message.get(col) for col in conflict_columns)
+        if identifier_tuple not in seen_identifiers:
+            seen_identifiers.add(identifier_tuple)
+            deduplicated_messages.append(message)
+        else:
+            duplicates_count += 1
+
+    if duplicates_count > 0:
+        logger.info(
+            "Removed %d internal duplicates from incoming batch", duplicates_count
+        )
+
+    messages_count = len(deduplicated_messages)
+    batches_count = (messages_count + batch_size - 1) // batch_size
+    batches_successful = 0
+
+    logger.info(
+        "Processing %d messages in %d batches of %d",
+        messages_count,
+        batches_count,
+        batch_size,
+    )
+
+    on_conflict_val = ",".join(conflict_columns)
+
+    for i in range(0, messages_count, batch_size):
+        batch = deduplicated_messages[i : i + batch_size]
+        batch_num = (i // batch_size) + 1
+
+        try:
+            response = (
+                client.client.table(table_name)
+                .upsert(batch, on_conflict=on_conflict_val)
+                .execute()
+            )
+
+            if response.data:
+                batches_successful += 1
+                logger.info(
+                    "Batch %d/%d: Successfully upserted %d messages",
+                    batch_num,
+                    batches_count,
+                    len(batch),
+                )
+            else:
+                logger.error(
+                    "Batch %d/%d: Error upserting %d messages",
+                    batch_num,
+                    batches_count,
+                    len(batch),
+                )
+                return False
+
+        except Exception as batch_error:
+            logger.error(
+                "Batch %d/%d: Error - %s", batch_num, batches_count, batch_error
+            )
+            return False
+
+    logger.info(
+        "Successfully completed %d/%d batches", batches_successful, batches_count
+    )
+    return True
 
 
 def supabase_batch_upload_with_retry(
@@ -609,82 +602,71 @@ def supabase_batch_upload_with_retry(
     *,
     client: DatabaseClient,
     batch_size: int = 1000,
-    max_retries: int = 3,
+    retries_max: int = 3,
 ) -> bool:
+    """Upload messages in batches with retry logic.
+
+    Args:
+        table_name: Name of the table to insert into.
+        messages: List of message dictionaries to upload.
+        client: DatabaseClient instance.
+        batch_size: Maximum rows per batch.
+        retries_max: Maximum retry attempts per batch.
+
+    Returns:
+        True if all batches succeeded, False otherwise.
+
+    Raises:
+        TypeError: If arguments have wrong types.
+        ValueError: If arguments have invalid values.
     """
-    Upload messages in batches with retry logic for large datasets.
-    """
-    assert isinstance(table_name, str), (
-        f"table_name must be string, got {type(table_name)}"
-    )
-    assert len(table_name.strip()) > 0, "table_name cannot be empty"
-    assert isinstance(messages, list), f"messages must be list, got {type(messages)}"
-    assert all(isinstance(msg, dict) for msg in messages), (
-        "All messages must be dictionaries"
-    )
-    assert isinstance(client, DatabaseClient), (
-        f"client must be DatabaseClient, got {type(client)}"
-    )
-    assert isinstance(batch_size, int), (
-        f"batch_size must be int, got {type(batch_size)}"
-    )
-    assert batch_size > 0, f"batch_size must be positive, got {batch_size}"
-    assert isinstance(max_retries, int), (
-        f"max_retries must be int, got {type(max_retries)}"
-    )
-    assert max_retries > 0, f"max_retries must be positive, got {max_retries}"
+    _validate_table_name(table_name)
+    if not isinstance(messages, list):
+        raise TypeError(f"messages must be list, got {type(messages).__name__}")
+    _validate_positive_int(batch_size, "batch_size")
+    _validate_positive_int(retries_max, "retries_max")
 
     if not messages:
-        print("No messages to upload")
+        logger.info("No messages to upload")
         return True
 
-    total_batches = (len(messages) + batch_size - 1) // batch_size
-    successful_batches = 0
-    assert total_batches >= 0, (
-        f"total_batches must be non-negative, got {total_batches}"
-    )
+    batches_count = (len(messages) + batch_size - 1) // batch_size
+    batches_successful = 0
 
     for i in range(0, len(messages), batch_size):
         batch = messages[i : i + batch_size]
         batch_num = (i // batch_size) + 1
-        assert isinstance(batch, list), f"batch must be list, got {type(batch)}"
-        assert len(batch) > 0, f"batch cannot be empty"
-        assert len(batch) <= batch_size, (
-            f"batch size {len(batch)} exceeds maximum {batch_size}"
-        )
-        assert all(isinstance(msg, dict) for msg in batch), (
-            "All batch messages must be dictionaries"
+
+        logger.info(
+            "Uploading batch %d/%d (%d messages)", batch_num, batches_count, len(batch)
         )
 
-        print(f"Uploading batch {batch_num}/{total_batches} ({len(batch)} messages)")
-
-        for attempt in range(max_retries):
+        for attempt in range(retries_max):
             try:
                 response = client.client.table(table_name).insert(batch).execute()
-                assert response is not None, "Database response cannot be None"
 
                 if response.data:
-                    assert isinstance(response.data, list), (
-                        f"response.data must be list, got {type(response.data)}"
-                    )
-                    successful_batches += 1
-                    print(f"Batch {batch_num} uploaded successfully")
+                    batches_successful += 1
+                    logger.info("Batch %d uploaded successfully", batch_num)
                     break
-                else:
-                    print(f"Batch {batch_num} failed - attempt {attempt + 1}")
+
+                logger.warning("Batch %d failed - attempt %d", batch_num, attempt + 1)
 
             except Exception as e:
-                print(f"Batch {batch_num} error (attempt {attempt + 1}): {e}")
+                logger.warning(
+                    "Batch %d error (attempt %d): %s", batch_num, attempt + 1, e
+                )
 
-            if attempt == max_retries - 1:
-                print(f"Batch {batch_num} failed after {max_retries} attempts")
+            if attempt == retries_max - 1:
+                logger.error(
+                    "Batch %d failed after %d attempts", batch_num, retries_max
+                )
                 return False
 
-    assert successful_batches <= total_batches, (
-        f"successful_batches {successful_batches} cannot exceed total_batches {total_batches}"
+    logger.info(
+        "Successfully uploaded %d/%d batches", batches_successful, batches_count
     )
-    print(f"Successfully uploaded {successful_batches}/{total_batches} batches")
-    return successful_batches == total_batches
+    return batches_successful == batches_count
 
 
 def supabase_check_message_exists(
@@ -693,20 +675,25 @@ def supabase_check_message_exists(
     client: DatabaseClient,
     table_name: str = "raw_data",
 ) -> bool:
+    """Check if a message exists in the database.
+
+    Args:
+        message_id: ID of the message to check.
+        client: DatabaseClient instance.
+        table_name: Name of the table to query.
+
+    Returns:
+        True if message exists, False otherwise.
+
+    Raises:
+        TypeError: If arguments have wrong types.
+        ValueError: If arguments have invalid values.
     """
-    Check if a message already exists in the database.
-    """
-    assert isinstance(message_id, int), (
-        f"message_id must be int, got {type(message_id)}"
-    )
-    assert message_id >= 0, f"message_id must be non-negative, got {message_id}"
-    assert isinstance(client, DatabaseClient), (
-        f"client must be DatabaseClient, got {type(client)}"
-    )
-    assert isinstance(table_name, str), (
-        f"table_name must be string, got {type(table_name)}"
-    )
-    assert len(table_name.strip()) > 0, "table_name cannot be empty"
+    if not isinstance(message_id, int):
+        raise TypeError(f"message_id must be int, got {type(message_id).__name__}")
+    if message_id < 0:
+        raise ValueError(f"message_id must be non-negative, got {message_id}")
+    _validate_table_name(table_name)
 
     try:
         response = (
@@ -715,28 +702,33 @@ def supabase_check_message_exists(
             .eq("message_id", message_id)
             .execute()
         )
-        assert response is not None, "Database response cannot be None"
-        assert hasattr(response, "data"), "Response must have data attribute"
-        assert isinstance(response.data, list), (
-            f"response.data must be list, got {type(response.data)}"
-        )
 
-        result = len(response.data) > 0
-        assert isinstance(result, bool), f"result must be bool, got {type(result)}"
-        return result
+        return len(response.data) > 0 if response.data else False
 
     except Exception as e:
-        print(f"Error checking message existence: {e}")
+        logger.error("Error checking message existence: %s", e)
         return False
 
 
-get_all_messages = partial(supabase_get_all_messages, client=db)
-get_recent_messages = partial(supabase_get_recent_messages, client=db)
-get_messages_by_timedelta = partial(supabase_get_messages_by_timedelta, client=db)
-upload_messages = partial(supabase_upload_messages, client=db)
-upsert_messages = partial(supabase_upsert_messages, client=db)
-batch_upload_with_retry = partial(supabase_batch_upload_with_retry, client=db)
-check_message_exists = partial(supabase_check_message_exists, client=db)
-stream_all_messages = partial(supabase_stream_all_messages, client=db)
-stream_recent_messages = partial(supabase_stream_recent_messages, client=db)
-stream_messages_by_timedelta = partial(supabase_stream_messages_by_timedelta, client=db)
+# Convenience partials using lazy-loaded shared client
+def _get_db_partial(func):  # type: ignore[no-untyped-def]
+    """Create a partial that lazily binds the shared db client."""
+
+    def wrapper(*args, **kwargs):  # type: ignore[no-untyped-def]
+        return func(*args, client=get_db(), **kwargs)
+
+    wrapper.__doc__ = func.__doc__
+    wrapper.__name__ = func.__name__.replace("supabase_", "")
+    return wrapper
+
+
+get_all_messages = _get_db_partial(supabase_get_all_messages)
+get_recent_messages = _get_db_partial(supabase_get_recent_messages)
+get_messages_by_timedelta = _get_db_partial(supabase_get_messages_by_timedelta)
+upload_messages = _get_db_partial(supabase_upload_messages)
+upsert_messages = _get_db_partial(supabase_upsert_messages)
+batch_upload_with_retry = _get_db_partial(supabase_batch_upload_with_retry)
+check_message_exists = _get_db_partial(supabase_check_message_exists)
+stream_all_messages = _get_db_partial(supabase_stream_all_messages)
+stream_recent_messages = _get_db_partial(supabase_stream_recent_messages)
+stream_messages_by_timedelta = _get_db_partial(supabase_stream_messages_by_timedelta)
