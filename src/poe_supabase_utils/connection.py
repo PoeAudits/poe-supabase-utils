@@ -4,8 +4,7 @@ import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from functools import partial
-from typing import Iterator, Optional
+from typing import Any, Callable, Iterator
 
 from supabase import Client, create_client
 
@@ -43,7 +42,7 @@ class DatabaseClient:
 
     client: Client
 
-    def __init__(self, config: Optional[object] = None) -> None:
+    def __init__(self, config: object | None = None) -> None:
         """Initialize DatabaseClient.
 
         Args:
@@ -63,14 +62,14 @@ class DatabaseClient:
 
     def __exit__(
         self,
-        exc_type: Optional[type],
-        exc_val: Optional[BaseException],
-        exc_tb: Optional[object],
+        exc_type: type | None,
+        exc_val: BaseException | None,
+        exc_tb: object | None,
     ) -> None:
         pass
 
 
-_db: Optional[DatabaseClient] = None
+_db: DatabaseClient | None = None
 
 
 def get_db() -> DatabaseClient:
@@ -489,7 +488,7 @@ def supabase_upsert_messages(
     messages: list[dict],
     *,
     client: DatabaseClient,
-    conflict_columns: Optional[list[str]] = None,
+    conflict_columns: list[str] | None = None,
     batch_size: int = 500,
 ) -> bool:
     """Upsert messages to a table with deduplication.
@@ -584,7 +583,7 @@ def supabase_upsert_messages(
                 )
                 return False
 
-        except Exception as batch_error:
+        except (ValueError, TypeError, RuntimeError) as batch_error:
             logger.error(
                 "Batch %d/%d: Error - %s", batch_num, batches_count, batch_error
             )
@@ -652,7 +651,7 @@ def supabase_batch_upload_with_retry(
 
                 logger.warning("Batch %d failed - attempt %d", batch_num, attempt + 1)
 
-            except Exception as e:
+            except (ValueError, TypeError, RuntimeError) as e:
                 logger.warning(
                     "Batch %d error (attempt %d): %s", batch_num, attempt + 1, e
                 )
@@ -705,16 +704,16 @@ def supabase_check_message_exists(
 
         return len(response.data) > 0 if response.data else False
 
-    except Exception as e:
+    except (ValueError, TypeError, RuntimeError) as e:
         logger.error("Error checking message existence: %s", e)
         return False
 
 
 # Convenience partials using lazy-loaded shared client
-def _get_db_partial(func):  # type: ignore[no-untyped-def]
+def _get_db_partial(func: Callable[..., Any]) -> Callable[..., Any]:
     """Create a partial that lazily binds the shared db client."""
 
-    def wrapper(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
         return func(*args, client=get_db(), **kwargs)
 
     wrapper.__doc__ = func.__doc__
