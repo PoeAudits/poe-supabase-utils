@@ -1,7 +1,17 @@
 [project]
 name = "poe-supabase-utils"
 version = "0.1.0"
-description = "Add your description here"
+description = "Supabase utilities for Poe audits project"
 readme = "README.md"
-requires-python = ">=3.14"
-dependencies = []
+authors = [
+    { name = "poeaudits", email = "poeaudits@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "supabase>=2.24.0",
+    "python-dotenv>=0.9.9",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.5,<0.10.0"]
+build-backend = "uv_build"
